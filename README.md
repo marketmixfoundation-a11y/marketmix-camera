@@ -11,7 +11,7 @@ An Android camera that blurs the background behind the subject **while you recor
 
 ## Download
 
-Get the APK from the [Releases page](../../releases/latest):
+Get the APK from the [Releases page](https://github.com/marketmixfoundation-a11y/marketmix-camera/releases/latest):
 
 1. Download `MarketMix-Camera-0.1.0.apk` on your phone.
 2. Open it and allow "install unknown apps" when Android asks.
