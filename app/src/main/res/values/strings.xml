@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MarketMix Camera</string>
+    <string name="record">Record</string>
+    <string name="stop">Stop</string>
+    <string name="flip">Flip</string>
+    <string name="invert">Invert subject</string>
+    <string name="blur">Blur</string>
+    <string name="ready">Ready</string>
+    <string name="recording">Recording</string>
+    <string name="saved">Saved to Movies/MarketMix Camera</string>
+    <string name="saving">Saving…</string>
+    <string name="save_failed">Could not save the video</string>
+    <string name="record_failed">Could not start recording</string>
+    <string name="camera_error">Camera error: %1$s</string>
+    <string name="permission_needed">Camera and microphone permission are needed to record.</string>
+</resources>
