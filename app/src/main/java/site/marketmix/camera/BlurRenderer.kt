@@ -81,6 +81,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
     private var compMirrorLoc = 0
     private var compInvertLoc = 0
     private var compSoftLoc = 0
+    private var compStrengthLoc = 0
     private var encPosition = 0
     private var encTexCoord = 0
     private var encTexLoc = 0
@@ -175,6 +176,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
         compMirrorLoc = GLES20.glGetUniformLocation(compProg, "uMirror")
         compInvertLoc = GLES20.glGetUniformLocation(compProg, "uInvert")
         compSoftLoc = GLES20.glGetUniformLocation(compProg, "uSoft")
+        compStrengthLoc = GLES20.glGetUniformLocation(compProg, "uStrength")
 
         camTex = newTexture()
         maskTex = newTexture()
@@ -274,6 +276,14 @@ class BlurRenderer : GLSurfaceView.Renderer {
         GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
     }
 
+    /**
+     * How much of the soft background shows through. The blur buffer is a
+     * quarter of the frame, so the curve keeps the low steps from looking
+     * like the full-strength blur.
+     */
+    private fun strength(): Float =
+        if (blurAmount <= 0f) 0f else Math.pow(blurAmount.toDouble(), 2.3).toFloat()
+
     private fun renderScene() {
         val sharpFbo = sharp ?: return
         val smallFbo = small ?: return
@@ -336,6 +346,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
         GLES20.glUniform1f(compMirrorLoc, if (mirror) 1f else 0f)
         GLES20.glUniform1f(compInvertLoc, if (invert) 1f else 0f)
         GLES20.glUniform1f(compSoftLoc, edgeSoftness)
+        GLES20.glUniform1f(compStrengthLoc, strength())
         drawQuad(vPosition, vTexCoord)
     }
 
@@ -535,6 +546,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
             uniform float uMirror;
             uniform float uInvert;
             uniform float uSoft;
+            uniform float uStrength;
             varying vec2 vUv;
             void main() {
                 vec2 outTopDown = vec2(vUv.x, 1.0 - vUv.y);
@@ -546,6 +558,10 @@ class BlurRenderer : GLSurfaceView.Renderer {
                 if (uMirror > 0.5) q.x = 1.0 - q.x;
                 vec3 sharp = texture2D(uSharp, vec2(q.x, 1.0 - q.y)).rgb;
                 vec3 blur = texture2D(uBlur, vec2(q.x, 1.0 - q.y)).rgb;
+                // The blurred copy always comes from a 320x180 buffer, so it is
+                // far softer than any amount the low end of the scale should
+                // show; the background is mixed between the two instead.
+                vec3 bg = mix(sharp, blur, uStrength);
                 float m = texture2D(uMask, q).r;
                 // uSoft slides the sample spread and the transition band, so
                 // at 0 the taps collapse onto the centre and the ramp is the
@@ -559,7 +575,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
                 if (uInvert > 0.5) m = 1.0 - m;
                 float band = mix(0.15, 0.45, uSoft);
                 m = smoothstep(0.5 - band, 0.5 + band, m);
-                gl_FragColor = vec4(mix(blur, sharp, m), 1.0);
+                gl_FragColor = vec4(mix(bg, sharp, m), 1.0);
             }
         """
     }

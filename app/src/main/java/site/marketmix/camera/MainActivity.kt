@@ -35,7 +35,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var recordButton: Button
     private lateinit var blurLabel: TextView
-    private var blurPercent = DEFAULT_BLUR
+    private var blurStep = DEFAULT_BLUR
     private lateinit var smoothLabel: TextView
     private var edgePercent = DEFAULT_SMOOTH
 
@@ -79,9 +79,9 @@ class MainActivity : AppCompatActivity() {
         val renderer = glView.renderer
         renderer.rotationDeg = 90
 
-        findViewById<Button>(R.id.blur_minus).setOnClickListener { setBlur(blurPercent - BLUR_STEP) }
-        findViewById<Button>(R.id.blur_plus).setOnClickListener { setBlur(blurPercent + BLUR_STEP) }
-        setBlur(blurPercent)
+        findViewById<Button>(R.id.blur_minus).setOnClickListener { setBlur(blurStep - BLUR_STEP) }
+        findViewById<Button>(R.id.blur_plus).setOnClickListener { setBlur(blurStep + BLUR_STEP) }
+        setBlur(blurStep)
 
         invertBox.setOnCheckedChangeListener { _, checked ->
             renderer.invert = checked
@@ -148,11 +148,11 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    /** Blur strength in whole percent, so a value can be set exactly. */
-    private fun setBlur(percent: Int) {
-        blurPercent = percent.coerceIn(0, 100)
-        blurLabel.text = getString(R.string.percent, blurPercent)
-        glView.renderer.blurAmount = blurPercent / 100f
+    /** Blur step on the 0-10 scale the panel shows. */
+    private fun setBlur(step: Int) {
+        blurStep = step.coerceIn(0, BLUR_MAX)
+        blurLabel.text = blurStep.toString()
+        glView.renderer.blurAmount = blurStep / BLUR_MAX.toFloat()
         glView.requestRender()
     }
 
@@ -409,8 +409,9 @@ class MainActivity : AppCompatActivity() {
         private const val MASK_SIZE = 256
         private const val MAX_SECONDS = 300L
         private const val ENCODER_TIMEOUT_SECONDS = 2L
-        private const val DEFAULT_BLUR = 2
+        private const val DEFAULT_BLUR = 5
+        private const val BLUR_MAX = 10
+        private const val BLUR_STEP = 1
         private const val DEFAULT_SMOOTH = 0
-        private const val BLUR_STEP = 5
     }
 }
