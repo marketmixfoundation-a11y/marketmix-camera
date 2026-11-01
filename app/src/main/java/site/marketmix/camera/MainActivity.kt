@@ -11,6 +11,7 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.SeekBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -35,6 +36,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var recordButton: Button
     private lateinit var blurLabel: TextView
     private var blurPercent = DEFAULT_BLUR
+    private lateinit var smoothLabel: TextView
+    private var edgePercent = DEFAULT_SMOOTH
 
     private lateinit var segmenter: Segmenter
     private var controller: CameraController? = null
@@ -69,6 +72,7 @@ class MainActivity : AppCompatActivity() {
         status = findViewById(R.id.status)
         recordButton = findViewById(R.id.record)
         blurLabel = findViewById(R.id.blur_value)
+        smoothLabel = findViewById(R.id.smooth_value)
         val invertBox = findViewById<CheckBox>(R.id.invert)
         val flipButton = findViewById<Button>(R.id.flip)
 
@@ -83,6 +87,18 @@ class MainActivity : AppCompatActivity() {
             renderer.invert = checked
             glView.requestRender()
         }
+
+        findViewById<SeekBar>(R.id.smooth).setOnSeekBarChangeListener(
+            object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
+                    setSmooth(progress)
+                }
+
+                override fun onStartTrackingTouch(bar: SeekBar) = Unit
+                override fun onStopTrackingTouch(bar: SeekBar) = Unit
+            }
+        )
+        setSmooth(edgePercent)
 
         flipButton.setOnClickListener {
             if (recording) return@setOnClickListener
@@ -135,8 +151,16 @@ class MainActivity : AppCompatActivity() {
     /** Blur strength in whole percent, so a value can be set exactly. */
     private fun setBlur(percent: Int) {
         blurPercent = percent.coerceIn(0, 100)
-        blurLabel.text = getString(R.string.blur_percent, blurPercent)
+        blurLabel.text = getString(R.string.percent, blurPercent)
         glView.renderer.blurAmount = blurPercent / 100f
+        glView.requestRender()
+    }
+
+    /** How far the cut line is feathered, in percent of its full range. */
+    private fun setSmooth(percent: Int) {
+        edgePercent = percent.coerceIn(0, 100)
+        smoothLabel.text = getString(R.string.percent, edgePercent)
+        glView.renderer.edgeSoftness = edgePercent / 100f
         glView.requestRender()
     }
 
@@ -385,7 +409,8 @@ class MainActivity : AppCompatActivity() {
         private const val MASK_SIZE = 256
         private const val MAX_SECONDS = 300L
         private const val ENCODER_TIMEOUT_SECONDS = 2L
-        private const val DEFAULT_BLUR = 45
+        private const val DEFAULT_BLUR = 2
+        private const val DEFAULT_SMOOTH = 0
         private const val BLUR_STEP = 5
     }
 }

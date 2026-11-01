@@ -24,8 +24,9 @@ import javax.microedition.khronos.opengles.GL10
  */
 class BlurRenderer : GLSurfaceView.Renderer {
 
-    @Volatile var blurAmount = 0.45f
+    @Volatile var blurAmount = 0.02f
     @Volatile var invert = false
+    @Volatile var edgeSoftness = 0f
     @Volatile var rotationDeg = 90
     @Volatile var mirror = false
 
@@ -79,6 +80,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
     private var compRotLoc = 0
     private var compMirrorLoc = 0
     private var compInvertLoc = 0
+    private var compSoftLoc = 0
     private var encPosition = 0
     private var encTexCoord = 0
     private var encTexLoc = 0
@@ -172,6 +174,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
         compRotLoc = GLES20.glGetUniformLocation(compProg, "uRot")
         compMirrorLoc = GLES20.glGetUniformLocation(compProg, "uMirror")
         compInvertLoc = GLES20.glGetUniformLocation(compProg, "uInvert")
+        compSoftLoc = GLES20.glGetUniformLocation(compProg, "uSoft")
 
         camTex = newTexture()
         maskTex = newTexture()
@@ -324,7 +327,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, sharpFbo.tex)
         GLES20.glUniform1i(compSharpLoc, 0)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, if (hasMask && blurAmount > 0.02f) smallFbo.tex else sharpFbo.tex)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, if (hasMask && blurAmount > 0f) smallFbo.tex else sharpFbo.tex)
         GLES20.glUniform1i(compBlurLoc, 1)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, maskTex)
@@ -332,6 +335,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
         GLES20.glUniform1f(compRotLoc, Math.toRadians(rotationDeg.toDouble()).toFloat())
         GLES20.glUniform1f(compMirrorLoc, if (mirror) 1f else 0f)
         GLES20.glUniform1f(compInvertLoc, if (invert) 1f else 0f)
+        GLES20.glUniform1f(compSoftLoc, edgeSoftness)
         drawQuad(vPosition, vTexCoord)
     }
 
@@ -530,6 +534,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
             uniform float uRot;
             uniform float uMirror;
             uniform float uInvert;
+            uniform float uSoft;
             varying vec2 vUv;
             void main() {
                 vec2 outTopDown = vec2(vUv.x, 1.0 - vUv.y);
@@ -542,8 +547,18 @@ class BlurRenderer : GLSurfaceView.Renderer {
                 vec3 sharp = texture2D(uSharp, vec2(q.x, 1.0 - q.y)).rgb;
                 vec3 blur = texture2D(uBlur, vec2(q.x, 1.0 - q.y)).rgb;
                 float m = texture2D(uMask, q).r;
+                // uSoft slides the sample spread and the transition band, so
+                // at 0 the taps collapse onto the centre and the ramp is the
+                // plain cut.
+                float t = 0.01171875 * uSoft;
+                m += texture2D(uMask, q + vec2(t, 0.0)).r;
+                m += texture2D(uMask, q - vec2(t, 0.0)).r;
+                m += texture2D(uMask, q + vec2(0.0, t)).r;
+                m += texture2D(uMask, q - vec2(0.0, t)).r;
+                m *= 0.2;
                 if (uInvert > 0.5) m = 1.0 - m;
-                m = smoothstep(0.35, 0.65, m);
+                float band = mix(0.15, 0.45, uSoft);
+                m = smoothstep(0.5 - band, 0.5 + band, m);
                 gl_FragColor = vec4(mix(blur, sharp, m), 1.0);
             }
         """
