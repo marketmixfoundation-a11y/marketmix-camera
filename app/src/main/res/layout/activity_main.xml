@@ -53,19 +53,47 @@
             android:orientation="horizontal">
 
             <TextView
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
+                android:layout_weight="1"
                 android:text="@string/blur"
                 android:textColor="#D0D0D5"
                 android:textSize="14sp" />
 
-            <SeekBar
-                android:id="@+id/blur"
-                android:layout_width="0dp"
+            <Button
+                android:id="@+id/blur_minus"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:background="@drawable/bg_pill"
+                android:contentDescription="@string/blur_decrease"
+                android:minWidth="0dp"
+                android:minHeight="0dp"
+                android:padding="0dp"
+                android:text="@string/blur_minus"
+                android:textColor="#F5F5F7"
+                android:textSize="18sp" />
+
+            <TextView
+                android:id="@+id/blur_value"
+                android:layout_width="66dp"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:max="100"
-                android:progress="45" />
+                android:gravity="center"
+                android:textColor="#F5F5F7"
+                android:textSize="16sp" />
+
+            <Button
+                android:id="@+id/blur_plus"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_pill"
+                android:contentDescription="@string/blur_increase"
+                android:minWidth="0dp"
+                android:minHeight="0dp"
+                android:padding="0dp"
+                android:text="@string/blur_plus"
+                android:textColor="#F5F5F7"
+                android:textSize="18sp" />
         </LinearLayout>
 
         <LinearLayout

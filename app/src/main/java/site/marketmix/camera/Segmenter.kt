@@ -1,82 +1,80 @@
 package site.marketmix.camera
 
-import android.content.Context
 import android.graphics.Bitmap
-import org.tensorflow.lite.Interpreter
-import java.io.FileInputStream
-import java.nio.ByteBuffer
+import android.graphics.Matrix
+import com.google.android.gms.tasks.Tasks
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.segmentation.Segmentation
+import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
 import java.nio.ByteOrder
-import java.nio.MappedByteBuffer
-import java.nio.channels.FileChannel
+import java.util.concurrent.TimeUnit
 
 /**
- * Selfie segmentation with the bundled MediaPipe selfie segmenter model.
- * The model takes a 256x256 RGB float image in [0,1] and returns a
- * single-channel person confidence map.
+ * Selfie segmentation through ML Kit, which carries its own copy of the model
+ * and the custom ops that model needs. The same model loaded on the stock
+ * TFLite runtime failed with "Encountered unresolved custom op:
+ * Convolution2DTransposeBias", because that op ships with MediaPipe, not
+ * TFLite.
+ *
+ * The mask is smoothed across frames so the blur edge does not flicker.
  */
-class Segmenter(context: Context) {
+class Segmenter {
 
-    private val interpreter: Interpreter
-    private val inW: Int
-    private val inH: Int
-    private val outW: Int
-    private val outH: Int
-    private val inputBuffer: ByteBuffer
-    private val outputBuffer: ByteBuffer
-    private var pixels = IntArray(0)
-    private val prevMask: FloatArray
+    private val detector = Segmentation.getClient(
+        SelfieSegmenterOptions.Builder()
+            .setDetectorMode(SelfieSegmenterOptions.STREAM_MODE)
+            .build()
+    )
 
-    init {
-        val options = Interpreter.Options().apply { setNumThreads(2) }
-        interpreter = Interpreter(loadModel(context), options)
-        val inShape = interpreter.getInputTensor(0).shape()
-        val outShape = interpreter.getOutputTensor(0).shape()
-        inH = inShape[1]
-        inW = inShape[2]
-        outH = outShape[1]
-        outW = outShape[2]
-        inputBuffer = ByteBuffer.allocateDirect(inW * inH * 3 * 4).order(ByteOrder.nativeOrder())
-        outputBuffer = ByteBuffer.allocateDirect(outW * outH * 4).order(ByteOrder.nativeOrder())
-        prevMask = FloatArray(outW * outH)
-        pixels = IntArray(inW * inH)
-    }
+    private val prevMask = FloatArray(MASK_SIZE * MASK_SIZE)
 
-    /** Fills [dest] (size outW*outH) with a smoothed person mask in 0..255. */
-    fun segment(bitmap: Bitmap, dest: ByteArray) {
-        val scaled = Bitmap.createScaledBitmap(bitmap, inW, inH, true)
-        scaled.getPixels(pixels, 0, inW, 0, 0, inW, inH)
-        if (scaled !== bitmap) scaled.recycle()
-
-        inputBuffer.rewind()
-        val fb = inputBuffer.asFloatBuffer()
-        var i = 0
-        for (p in pixels) {
-            fb.put(((p shr 16) and 0xFF) / 255f)
-            fb.put(((p shr 8) and 0xFF) / 255f)
-            fb.put((p and 0xFF) / 255f)
-            i++
+    /**
+     * Fills [dest] (size [MASK_SIZE] squared) with a smoothed person mask in
+     * 0..255, in the orientation of the frame it came from. [rotationDegrees]
+     * is how far the frame has to turn for the subject to stand up, which is
+     * the only way the model recognises one.
+     */
+    fun segment(bitmap: Bitmap, dest: ByteArray, rotationDegrees: Int) {
+        val quarter = ((rotationDegrees % 360) + 360) % 360
+        val upright = if (quarter == 0) bitmap else stoodUp(bitmap, quarter)
+        val mask = try {
+            Tasks.await(
+                detector.process(InputImage.fromBitmap(upright, 0)),
+                TIMEOUT_SECONDS,
+                TimeUnit.SECONDS
+            )
+        } finally {
+            if (upright !== bitmap) upright.recycle()
         }
-        inputBuffer.rewind()
-        outputBuffer.rewind()
-        interpreter.run(inputBuffer, outputBuffer)
-
-        outputBuffer.rewind()
-        val out = outputBuffer.asFloatBuffer()
-        var min = Float.MAX_VALUE
-        var max = -Float.MAX_VALUE
-        val n = outW * outH
-        for (k in 0 until n) {
-            val v = out.get(k)
-            if (v < min) min = v
-            if (v > max) max = v
-        }
-        val logits = min < -0.01f || max > 1.01f
-        for (k in 0 until n) {
-            var v = out.get(k)
-            if (logits) v = 1f / (1f + Math.exp((-v).toDouble()).toFloat())
-            v = v.coerceIn(0f, 1f)
-            prevMask[k] = prevMask[k] * 0.35f + v * 0.65f
-            dest[k] = (prevMask[k] * 255f).toInt().toByte()
+        val width = mask.width
+        val height = mask.height
+        if (width <= 0 || height <= 0) return
+        val confidence = mask.buffer.order(ByteOrder.nativeOrder()).asFloatBuffer()
+        for (y in 0 until MASK_SIZE) {
+            for (x in 0 until MASK_SIZE) {
+                var sx = x
+                var sy = y
+                when (quarter) {
+                    90 -> {
+                        sx = MASK_SIZE - 1 - y
+                        sy = x
+                    }
+                    180 -> {
+                        sx = MASK_SIZE - 1 - x
+                        sy = MASK_SIZE - 1 - y
+                    }
+                    270 -> {
+                        sx = y
+                        sy = MASK_SIZE - 1 - x
+                    }
+                }
+                val column = (sx * width / MASK_SIZE).coerceIn(0, width - 1)
+                val row = (sy * height / MASK_SIZE).coerceIn(0, height - 1)
+                val value = confidence.get(row * width + column).coerceIn(0f, 1f)
+                val i = y * MASK_SIZE + x
+                prevMask[i] = prevMask[i] * 0.35f + value * 0.65f
+                dest[i] = (prevMask[i] * 255f).toInt().toByte()
+            }
         }
     }
 
@@ -84,10 +82,15 @@ class Segmenter(context: Context) {
         prevMask.fill(0f)
     }
 
-    private fun loadModel(context: Context): MappedByteBuffer {
-        val afd = context.assets.openFd("selfie_segmenter.tflite")
-        FileInputStream(afd.fileDescriptor).use { stream ->
-            return stream.channel.map(FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength)
-        }
+    /** Turns the thumbnail clockwise so the subject stands up. */
+    private fun stoodUp(src: Bitmap, degrees: Int): Bitmap {
+        val matrix = Matrix()
+        matrix.postRotate(degrees.toFloat())
+        return Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
+    }
+
+    private companion object {
+        const val MASK_SIZE = 256
+        const val TIMEOUT_SECONDS = 5L
     }
 }

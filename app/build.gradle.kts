@@ -19,8 +19,14 @@ android {
         applicationId = "site.marketmix.camera"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "0.1.2"
+
+        ndk {
+            // ML Kit carries the segmentation runtime for every ABI, which is
+            // four times the app. Every phone this targets ships arm64.
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     signingConfigs {
@@ -50,6 +56,8 @@ android {
         jvmTarget = "17"
     }
     androidResources {
+        // ML Kit's bundled segmentation model is memory-mapped from the APK, so
+        // it has to stay uncompressed.
         noCompress += "tflite"
     }
 }
@@ -60,5 +68,5 @@ dependencies {
     implementation("androidx.camera:camera-core:1.4.1")
     implementation("androidx.camera:camera-camera2:1.4.1")
     implementation("androidx.camera:camera-lifecycle:1.4.1")
-    implementation("org.tensorflow:tensorflow-lite:2.16.1")
+    implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
 }

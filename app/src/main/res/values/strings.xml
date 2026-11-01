@@ -6,6 +6,11 @@
     <string name="flip">Flip</string>
     <string name="invert">Invert subject</string>
     <string name="blur">Blur</string>
+    <string name="blur_minus">−</string>
+    <string name="blur_plus">+</string>
+    <string name="blur_decrease">Decrease blur</string>
+    <string name="blur_increase">Increase blur</string>
+    <string name="blur_percent">%1$d%%</string>
     <string name="ready">Ready</string>
     <string name="recording">Recording</string>
     <string name="saved">Saved to Movies/MarketMix Camera</string>

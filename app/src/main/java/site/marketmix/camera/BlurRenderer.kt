@@ -135,6 +135,10 @@ class BlurRenderer : GLSurfaceView.Renderer {
         // different object.
         encProg = 0
         isEncoding = false
+        // release() detaches every context from this thread, so without the
+        // restore below the compositor draws into nothing and the preview
+        // keeps showing the last recorded frame.
+        restoreMain()
     }
 
     private var isEncoding = false
@@ -333,9 +337,13 @@ class BlurRenderer : GLSurfaceView.Renderer {
 
     private fun drawToScreen() {
         val finalTarget = finalFbo ?: return
+        if (viewW == 0 || viewH == 0) return
+        // The composite pass leaves the final target bound. Sampling it while
+        // it is still the draw target is undefined, and the window surface
+        // never receives a pixel, so the preview stays black.
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         GLES20.glViewport(0, 0, viewW, viewH)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        if (viewW == 0 || viewH == 0) return
         val scale = minOf(viewW.toFloat() / OUT_W, viewH.toFloat() / OUT_H)
         val w = (OUT_W * scale).toInt().coerceAtLeast(1)
         val h = (OUT_H * scale).toInt().coerceAtLeast(1)

@@ -11,7 +11,6 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
-import android.widget.SeekBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -34,6 +33,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var glView: CameraGLView
     private lateinit var status: TextView
     private lateinit var recordButton: Button
+    private lateinit var blurLabel: TextView
+    private var blurPercent = DEFAULT_BLUR
 
     private lateinit var segmenter: Segmenter
     private var controller: CameraController? = null
@@ -47,6 +48,10 @@ class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
 
     private var recording = false
+
+    /** Set while a take is being opened or closed off the main thread. */
+    @Volatile
+    private var recordBusy = false
     private var recordStartMs = 0L
     private var encoder: VideoEncoder? = null
     private var audio: AudioRecorder? = null
@@ -63,23 +68,16 @@ class MainActivity : AppCompatActivity() {
         glView = findViewById(R.id.camera_view)
         status = findViewById(R.id.status)
         recordButton = findViewById(R.id.record)
-        val blurBar = findViewById<SeekBar>(R.id.blur)
+        blurLabel = findViewById(R.id.blur_value)
         val invertBox = findViewById<CheckBox>(R.id.invert)
         val flipButton = findViewById<Button>(R.id.flip)
 
         val renderer = glView.renderer
         renderer.rotationDeg = 90
-        renderer.blurAmount = blurBar.progress / 100f
 
-        blurBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(bar: SeekBar, value: Int, fromUser: Boolean) {
-                renderer.blurAmount = value / 100f
-                glView.requestRender()
-            }
-
-            override fun onStartTrackingTouch(bar: SeekBar) {}
-            override fun onStopTrackingTouch(bar: SeekBar) {}
-        })
+        findViewById<Button>(R.id.blur_minus).setOnClickListener { setBlur(blurPercent - BLUR_STEP) }
+        findViewById<Button>(R.id.blur_plus).setOnClickListener { setBlur(blurPercent + BLUR_STEP) }
+        setBlur(blurPercent)
 
         invertBox.setOnCheckedChangeListener { _, checked ->
             renderer.invert = checked
@@ -96,9 +94,12 @@ class MainActivity : AppCompatActivity() {
             glView.requestRender()
         }
 
-        recordButton.setOnClickListener { if (recording) stopRecording() else startRecording() }
+        recordButton.setOnClickListener {
+            if (recordBusy) return@setOnClickListener
+            if (recording) stopRecording() else startRecording()
+        }
 
-        segmenter = Segmenter(this)
+        segmenter = Segmenter()
         applyInsets()
         ensurePermissions()
     }
@@ -110,7 +111,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
-        if (recording) stopRecording()
+        if (recording) {
+            recording = false
+            handler.removeCallbacks(ticker)
+            status.text = getString(R.string.saving)
+            // The render thread halts below and the encoder is fed from it, so
+            // a take still open has to be closed before leaving the foreground.
+            detachTake()?.let { status.text = getString(finishTake(it)) }
+        }
         cameraStarted = false
         controller?.stop()
         controller = null
@@ -122,6 +130,14 @@ class MainActivity : AppCompatActivity() {
         segmentExecutor.shutdownNow()
         ioExecutor.shutdownNow()
         super.onDestroy()
+    }
+
+    /** Blur strength in whole percent, so a value can be set exactly. */
+    private fun setBlur(percent: Int) {
+        blurPercent = percent.coerceIn(0, 100)
+        blurLabel.text = getString(R.string.blur_percent, blurPercent)
+        glView.renderer.blurAmount = blurPercent / 100f
+        glView.requestRender()
     }
 
     private fun applyInsets() {
@@ -182,7 +198,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun onCameraFrame(frame: Bitmap, rotationDegrees: Int, isFront: Boolean) {
         val renderer = glView.renderer
-        renderer.rotationDeg = rotationDegrees
+        // The front sensor reports a rotation that puts the picture on its
+        // head on this phone, so it gets half a turn beyond what it asks for.
+        renderer.rotationDeg = if (isFront) (rotationDegrees + 180) % 360 else rotationDegrees
         renderer.mirror = isFront
 
         val wantsMask = segmentBusy.compareAndSet(false, true)
@@ -194,7 +212,7 @@ class MainActivity : AppCompatActivity() {
         if (small != null) {
             segmentExecutor.execute {
                 try {
-                    segmenter.segment(small, maskBytes)
+                    segmenter.segment(small, maskBytes, rotationDegrees)
                     renderer.submitMask(MaskTools.toBitmap(maskBytes, MASK_SIZE))
                     glView.requestRender()
                 } catch (_: Exception) {
@@ -207,15 +225,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startRecording() {
-        if (recording) return
         if (!hasPermission(Manifest.permission.CAMERA)) {
             ensurePermissions()
             return
         }
+        recordBusy = true
         clipName = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val video = File(cacheDir, "raw_$clipName.mp4").apply { delete() }
-        val audioFile = File(cacheDir, "raw_$clipName.m4a").apply { delete() }
-        val combined = File(cacheDir, "final_$clipName.mp4").apply { delete() }
+        ioExecutor.execute {
+            val started = beginRecording(clipName)
+            runOnUiThread {
+                recordBusy = false
+                if (started) {
+                    recording = true
+                    recordStartMs = System.currentTimeMillis()
+                    recordButton.setBackgroundResource(R.drawable.bg_record_stop)
+                    recordButton.contentDescription = getString(R.string.stop)
+                    status.text = getString(R.string.recording)
+                    handler.postDelayed(ticker, 500)
+                } else {
+                    status.text = getString(R.string.record_failed)
+                }
+            }
+        }
+    }
+
+    /** Everything about starting a take that would stall the interface. */
+    private fun beginRecording(clip: String): Boolean {
+        val video = File(cacheDir, "raw_$clip.mp4").apply { delete() }
+        val audioFile = File(cacheDir, "raw_$clip.m4a").apply { delete() }
+        val combined = File(cacheDir, "final_$clip.mp4").apply { delete() }
 
         val audioRecorder = AudioRecorder(this, audioFile)
         val audioOk = if (hasPermission(Manifest.permission.RECORD_AUDIO)) audioRecorder.start() else false
@@ -225,8 +263,7 @@ class MainActivity : AppCompatActivity() {
             enc.start()
         } catch (e: Exception) {
             if (audioOk) audioRecorder.stop()
-            status.text = getString(R.string.record_failed)
-            return
+            return false
         }
 
         val latch = CountDownLatch(1)
@@ -235,7 +272,7 @@ class MainActivity : AppCompatActivity() {
             latch.countDown()
         }
         val ready = try {
-            latch.await(2, TimeUnit.SECONDS)
+            latch.await(ENCODER_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         } catch (e: InterruptedException) {
             false
         }
@@ -245,8 +282,7 @@ class MainActivity : AppCompatActivity() {
             enc.stop()
             video.delete()
             audioFile.delete()
-            status.text = getString(R.string.record_failed)
-            return
+            return false
         }
 
         encoder = enc
@@ -255,59 +291,77 @@ class MainActivity : AppCompatActivity() {
         videoTemp = video
         audioTemp = if (audioOk) audioFile else null
         finalTemp = combined
-        recording = true
-        recordStartMs = System.currentTimeMillis()
-        recordButton.setBackgroundResource(R.drawable.bg_record_stop)
-        recordButton.contentDescription = getString(R.string.stop)
-        status.text = getString(R.string.recording)
-        handler.postDelayed(ticker, 500)
+        return true
     }
 
     private var rendererStarted = false
 
-    private fun stopRecording() {
-        if (!recording) return
-        recording = false
-        handler.removeCallbacks(ticker)
-        recordButton.setBackgroundResource(R.drawable.bg_record)
-        recordButton.contentDescription = getString(R.string.record)
+    /** A finished recording, detached from the activity's fields. */
+    private class Take(
+        val encoder: VideoEncoder,
+        val audio: AudioRecorder?,
+        val video: File?,
+        val audioFile: File?,
+        val combined: File?,
+        val clip: String
+    )
 
-        audio?.stop()
-        audio = null
-
-        val enc = encoder ?: return
+    private fun detachTake(): Take? {
+        val enc = encoder ?: return null
         encoder = null
+        val take = Take(enc, audio, videoTemp, audioTemp, finalTemp, clipName)
+        audio = null
+        videoTemp = null
+        audioTemp = null
+        finalTemp = null
+        return take
+    }
+
+    /** Closes the encoder and writes the clip. Blocks for seconds, so keep it off the main thread. */
+    private fun finishTake(take: Take): Int {
+        take.audio?.stop()
         val latch = CountDownLatch(1)
         glView.queueEvent {
             glView.renderer.stopEncoder()
             latch.countDown()
         }
         try {
-            latch.await(1, TimeUnit.SECONDS)
+            latch.await(ENCODER_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         } catch (_: InterruptedException) {
         }
-        val videoOk = enc.stop()
+        val videoOk = take.encoder.stop()
 
-        val video = videoTemp
-        val audioFile = audioTemp
-        val combined = finalTemp
-        videoTemp = null
-        audioTemp = null
-        finalTemp = null
+        var uri: Uri? = null
+        if (videoOk && take.video != null && take.combined != null) {
+            if (VideoMuxer.combine(take.video, take.audioFile, take.combined)) {
+                uri = Gallery.save(this, take.combined, "MarketMix_${take.clip}.mp4")
+            }
+        }
+        take.video?.delete()
+        take.audioFile?.delete()
+        take.combined?.delete()
+        return if (uri != null) R.string.saved else R.string.save_failed
+    }
+
+    private fun stopRecording() {
+        if (!recording) return
+        recording = false
+        recordBusy = true
+        handler.removeCallbacks(ticker)
+        recordButton.setBackgroundResource(R.drawable.bg_record)
+        recordButton.contentDescription = getString(R.string.record)
         status.text = getString(R.string.saving)
 
+        val take = detachTake() ?: run {
+            recordBusy = false
+            return
+        }
         ioExecutor.execute {
-            var uri: Uri? = null
-            if (videoOk && video != null && combined != null) {
-                if (VideoMuxer.combine(video, audioFile, combined)) {
-                    uri = Gallery.save(this, combined, "MarketMix_$clipName.mp4")
-                }
+            val message = finishTake(take)
+            runOnUiThread {
+                recordBusy = false
+                if (!recording) status.text = getString(message)
             }
-            video?.delete()
-            audioFile?.delete()
-            combined?.delete()
-            val message = if (uri != null) getString(R.string.saved) else getString(R.string.save_failed)
-            runOnUiThread { if (!recording) status.text = message }
         }
     }
 
@@ -330,5 +384,8 @@ class MainActivity : AppCompatActivity() {
         private const val REQUEST_PERMISSIONS = 1001
         private const val MASK_SIZE = 256
         private const val MAX_SECONDS = 300L
+        private const val ENCODER_TIMEOUT_SECONDS = 2L
+        private const val DEFAULT_BLUR = 45
+        private const val BLUR_STEP = 5
     }
 }
