@@ -29,6 +29,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
     @Volatile var edgeSoftness = 0f
     @Volatile var rotationDeg = 90
     @Volatile var mirror = false
+    @Volatile var preset = LensPreset.DEFAULT
 
     /** Invoked on the GL thread once the EGL context exists. */
     var onReady: (() -> Unit)? = null
@@ -61,6 +62,10 @@ class BlurRenderer : GLSurfaceView.Renderer {
     private var sharp: Fbo? = null
     private var small: Fbo? = null
     private var blurred: Fbo? = null
+    private var midA: Fbo? = null
+    private var midB: Fbo? = null
+    private var deepA: Fbo? = null
+    private var deepB: Fbo? = null
     private var finalFbo: Fbo? = null
     private var maskScratch: Fbo? = null
     private var maskSoft: Fbo? = null
@@ -74,10 +79,13 @@ class BlurRenderer : GLSurfaceView.Renderer {
     private var vPosition = 0
     private var vTexCoord = 0
     private var blitTexLoc = 0
+    private var blitProgTexLoc = 0
     private var blurTexLoc = 0
     private var blurDirLoc = 0
     private var compSharpLoc = 0
     private var compBlurLoc = 0
+    private var compDeepLoc = 0
+    private var compMidLoc = 0
     private var compMaskLoc = 0
     private var compRotLoc = 0
     private var compMirrorLoc = 0
@@ -86,6 +94,12 @@ class BlurRenderer : GLSurfaceView.Renderer {
     private var compShrinkLoc = 0
     private var compDeconLoc = 0
     private var compStrengthLoc = 0
+    private var compAmountLoc = 0
+    private var compOutAspectLoc = 0
+    private var compVignetteLoc = 0
+    private var compBloomLoc = 0
+    private var compFalloffLoc = 0
+    private var compDesatLoc = 0
     private var encPosition = 0
     private var encTexCoord = 0
     private var encTexLoc = 0
@@ -168,6 +182,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
         blitTexLoc = GLES20.glGetUniformLocation(camProg, "uTex")
 
         blitProg = linkProgram(VERTEX, BLIT_FRAGMENT)
+        blitProgTexLoc = GLES20.glGetUniformLocation(blitProg, "uTex")
         blurProg = linkProgram(VERTEX, BLUR_FRAGMENT)
         blurTexLoc = GLES20.glGetUniformLocation(blurProg, "uTex")
         blurDirLoc = GLES20.glGetUniformLocation(blurProg, "uDir")
@@ -175,6 +190,8 @@ class BlurRenderer : GLSurfaceView.Renderer {
         compProg = linkProgram(VERTEX, COMPOSITE_FRAGMENT)
         compSharpLoc = GLES20.glGetUniformLocation(compProg, "uSharp")
         compBlurLoc = GLES20.glGetUniformLocation(compProg, "uBlur")
+        compDeepLoc = GLES20.glGetUniformLocation(compProg, "uDeep")
+        compMidLoc = GLES20.glGetUniformLocation(compProg, "uMid")
         compMaskLoc = GLES20.glGetUniformLocation(compProg, "uMask")
         compRotLoc = GLES20.glGetUniformLocation(compProg, "uRot")
         compMirrorLoc = GLES20.glGetUniformLocation(compProg, "uMirror")
@@ -183,6 +200,12 @@ class BlurRenderer : GLSurfaceView.Renderer {
         compShrinkLoc = GLES20.glGetUniformLocation(compProg, "uShrink")
         compDeconLoc = GLES20.glGetUniformLocation(compProg, "uDecon")
         compStrengthLoc = GLES20.glGetUniformLocation(compProg, "uStrength")
+        compAmountLoc = GLES20.glGetUniformLocation(compProg, "uAmount")
+        compOutAspectLoc = GLES20.glGetUniformLocation(compProg, "uOutAspect")
+        compVignetteLoc = GLES20.glGetUniformLocation(compProg, "uVignette")
+        compBloomLoc = GLES20.glGetUniformLocation(compProg, "uBloom")
+        compFalloffLoc = GLES20.glGetUniformLocation(compProg, "uFalloff")
+        compDesatLoc = GLES20.glGetUniformLocation(compProg, "uDesat")
 
         camTex = newTexture()
         maskTex = newTexture()
@@ -195,6 +218,10 @@ class BlurRenderer : GLSurfaceView.Renderer {
         sharp = createFbo(CAM_W, CAM_H)
         small = createFbo(SMALL_W, SMALL_H)
         blurred = createFbo(SMALL_W, SMALL_H)
+        midA = createFbo(MID_W, MID_H)
+        midB = createFbo(MID_W, MID_H)
+        deepA = createFbo(DEEP_W, DEEP_H)
+        deepB = createFbo(DEEP_W, DEEP_H)
         finalFbo = createFbo(OUT_W, OUT_H)
         maskScratch = createFbo(MASK_RES, MASK_RES)
         maskSoft = createFbo(MASK_RES, MASK_RES)
@@ -205,14 +232,19 @@ class BlurRenderer : GLSurfaceView.Renderer {
     }
 
     private fun releaseGl() {
-        listOf(sharp, small, blurred, finalFbo, maskScratch, maskSoft).forEach { fbo ->
-            fbo ?: return@forEach
-            GLES20.glDeleteFramebuffers(1, intArrayOf(fbo.fbo), 0)
-            GLES20.glDeleteTextures(1, intArrayOf(fbo.tex), 0)
-        }
+        listOf(sharp, small, blurred, midA, midB, deepA, deepB, finalFbo, maskScratch, maskSoft)
+            .forEach { fbo ->
+                fbo ?: return@forEach
+                GLES20.glDeleteFramebuffers(1, intArrayOf(fbo.fbo), 0)
+                GLES20.glDeleteTextures(1, intArrayOf(fbo.tex), 0)
+            }
         sharp = null
         small = null
         blurred = null
+        midA = null
+        midB = null
+        deepA = null
+        deepB = null
         finalFbo = null
         maskScratch = null
         maskSoft = null
@@ -287,23 +319,31 @@ class BlurRenderer : GLSurfaceView.Renderer {
     }
 
     /**
-     * How much of the soft background shows through. The blur buffer is a
-     * quarter of the frame, so the curve keeps the low steps from looking
-     * like the full-strength blur.
+     * How much of the defocused background shows through. Below a quarter of
+     * the dial the backdrop fades in so the smallest steps are still gentle;
+     * past that the background is fully defocused and the octave mix decides
+     * how wide the glow is. Blending a half-strength blur over a sharp copy
+     * would read as a double image, which no lens produces.
      */
     private fun strength(): Float =
-        if (blurAmount <= 0f) 0f else Math.pow(blurAmount.toDouble(), 2.3).toFloat()
+        if (blurAmount <= 0f) 0f else minOf(1f, blurAmount / STRENGTH_KNEE)
 
     private fun renderScene() {
         val sharpFbo = sharp ?: return
         val smallFbo = small ?: return
         val blurFbo = blurred ?: return
+        val midAFbo = midA ?: return
+        val midBFbo = midB ?: return
+        val deepAFbo = deepA ?: return
+        val deepBFbo = deepB ?: return
         val finalTarget = finalFbo ?: return
 
+        val lens = preset
+        val amount = blurAmount
         val aspect = if (camH > 0) camW.toFloat() / camH else CAM_W.toFloat() / CAM_H
         // A wider blur needs a wider blend or the cut reads as a hard line, so
         // the feather grows with the blur as well as with the slider.
-        val feather = edgeSoftness * FEATHER_MAX + blurAmount * BLUR_FEATHER
+        val feather = edgeSoftness * FEATHER_MAX + amount * BLUR_FEATHER
         renderMask(aspect, feather)
 
         // Sharp camera frame, stored top-down in the target.
@@ -315,37 +355,22 @@ class BlurRenderer : GLSurfaceView.Renderer {
         GLES20.glUniform1i(blitTexLoc, 0)
         drawQuad(vPosition, vTexCoord)
 
-        // Downscale, then separable blur.
-        bind(smallFbo)
-        GLES20.glViewport(0, 0, SMALL_W, SMALL_H)
-        GLES20.glUseProgram(blitProg)
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, sharpFbo.tex)
-        GLES20.glUniform1i(blitTexLoc, 0)
-        drawQuad(vPosition, vTexCoord)
+        // Three shrinking levels. Blurring where the texels are already large
+        // gives a round, even defocus; one wide kernel on a single buffer smears
+        // into visible streaks and leaves detail behind.
+        blitInto(smallFbo, sharpFbo.tex)
+        blurInto(blurFbo, smallFbo.tex, true, 0.8f + amount * 3.0f)
+        blurInto(smallFbo, blurFbo.tex, false, 0.8f + amount * 3.0f)
 
-        val radius = 0.8f + blurAmount * 5.5f
-        bind(blurFbo)
-        GLES20.glViewport(0, 0, SMALL_W, SMALL_H)
-        GLES20.glUseProgram(blurProg)
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, smallFbo.tex)
-        GLES20.glUniform1i(blurTexLoc, 0)
-        GLES20.glUniform2f(blurDirLoc, radius / SMALL_W, 0f)
-        drawQuad(vPosition, vTexCoord)
+        blitInto(midAFbo, smallFbo.tex)
+        blurInto(midBFbo, midAFbo.tex, true, 1.7f)
+        blurInto(midAFbo, midBFbo.tex, false, 1.7f)
 
-        // Rotate the pass: the second (vertical) blur reads `blurred` and
-        // lands back in `small`, which is what the composite samples.
-        bind(smallFbo)
-        GLES20.glViewport(0, 0, SMALL_W, SMALL_H)
-        GLES20.glUseProgram(blurProg)
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, blurFbo.tex)
-        GLES20.glUniform1i(blurTexLoc, 0)
-        GLES20.glUniform2f(blurDirLoc, 0f, radius / SMALL_H)
-        drawQuad(vPosition, vTexCoord)
+        blitInto(deepAFbo, midAFbo.tex)
+        blurInto(deepBFbo, deepAFbo.tex, true, 1.7f)
+        blurInto(deepAFbo, deepBFbo.tex, false, 1.7f)
 
-        // Composite subject + blurred background.
+        // Composite subject + defocused background.
         bind(finalTarget)
         GLES20.glViewport(0, 0, OUT_W, OUT_H)
         GLES20.glUseProgram(compProg)
@@ -353,20 +378,57 @@ class BlurRenderer : GLSurfaceView.Renderer {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, sharpFbo.tex)
         GLES20.glUniform1i(compSharpLoc, 0)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, if (hasMask && blurAmount > 0f) smallFbo.tex else sharpFbo.tex)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, if (hasMask && amount > 0f) smallFbo.tex else sharpFbo.tex)
         GLES20.glUniform1i(compBlurLoc, 1)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, if (hasMask) maskSoft?.tex ?: maskTex else maskTex)
         GLES20.glUniform1i(compMaskLoc, 2)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE3)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, if (hasMask && amount > 0f) deepAFbo.tex else sharpFbo.tex)
+        GLES20.glUniform1i(compDeepLoc, 3)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE4)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, if (hasMask && amount > 0f) midAFbo.tex else sharpFbo.tex)
+        GLES20.glUniform1i(compMidLoc, 4)
         GLES20.glUniform1f(compRotLoc, Math.toRadians(rotationDeg.toDouble()).toFloat())
         GLES20.glUniform1f(compMirrorLoc, if (mirror) 1f else 0f)
         GLES20.glUniform1f(compInvertLoc, if (invert) 1f else 0f)
         GLES20.glUniform1f(compAspectLoc, aspect)
-        GLES20.glUniform1f(compShrinkLoc, blurAmount * SHRINK_MAX)
+        GLES20.glUniform1f(compShrinkLoc, amount * SHRINK_MAX)
         GLES20.glUniform1f(compDeconLoc, minOf(3f, 1f + feather * 0.4f))
         GLES20.glUniform1f(compStrengthLoc, strength())
+        GLES20.glUniform1f(compAmountLoc, amount)
+        GLES20.glUniform1f(compOutAspectLoc, OUT_W.toFloat() / OUT_H)
+        GLES20.glUniform1f(compVignetteLoc, lens.vignette)
+        GLES20.glUniform1f(compBloomLoc, lens.bloom)
+        GLES20.glUniform1f(compFalloffLoc, lens.falloff)
+        GLES20.glUniform1f(compDesatLoc, lens.desat)
         drawQuad(vPosition, vTexCoord)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+    }
+
+    private fun blitInto(target: Fbo, source: Int) {
+        bind(target)
+        GLES20.glViewport(0, 0, target.w, target.h)
+        GLES20.glUseProgram(blitProg)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source)
+        GLES20.glUniform1i(blitProgTexLoc, 0)
+        drawQuad(vPosition, vTexCoord)
+    }
+
+    private fun blurInto(target: Fbo, source: Int, horizontal: Boolean, texels: Float) {
+        bind(target)
+        GLES20.glViewport(0, 0, target.w, target.h)
+        GLES20.glUseProgram(blurProg)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source)
+        GLES20.glUniform1i(blurTexLoc, 0)
+        if (horizontal) {
+            GLES20.glUniform2f(blurDirLoc, texels / target.w, 0f)
+        } else {
+            GLES20.glUniform2f(blurDirLoc, 0f, texels / target.h)
+        }
+        drawQuad(vPosition, vTexCoord)
     }
 
     /**
@@ -415,7 +477,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
         GLES20.glUseProgram(blitProg)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, finalTarget.tex)
-        GLES20.glUniform1i(blitTexLoc, 0)
+        GLES20.glUniform1i(blitProgTexLoc, 0)
         drawQuad(vPosition, vTexCoord)
     }
 
@@ -540,6 +602,10 @@ class BlurRenderer : GLSurfaceView.Renderer {
         const val OUT_H = 1280
         const val SMALL_W = 320
         const val SMALL_H = 180
+        const val MID_W = 160
+        const val MID_H = 90
+        const val DEEP_W = 80
+        const val DEEP_H = 45
         const val MASK_RES = 256
 
         /** Matte feather, in mask texels of frame width, at full smoothness. */
@@ -550,6 +616,9 @@ class BlurRenderer : GLSurfaceView.Renderer {
 
         /** How far the matte comes back off the subject at full blur. */
         private const val SHRINK_MAX = 1.5f
+
+        /** Part of the dial over which the backdrop fades in from sharp. */
+        private const val STRENGTH_KNEE = 0.3f
 
         private const val VERTEX = """
             attribute vec4 aPos;
@@ -598,14 +667,22 @@ class BlurRenderer : GLSurfaceView.Renderer {
             precision highp float;
             uniform sampler2D uSharp;
             uniform sampler2D uBlur;
+            uniform sampler2D uMid;
+            uniform sampler2D uDeep;
             uniform sampler2D uMask;
             uniform float uRot;
             uniform float uMirror;
             uniform float uInvert;
             uniform float uAspect;
+            uniform float uOutAspect;
             uniform float uShrink;
             uniform float uDecon;
             uniform float uStrength;
+            uniform float uAmount;
+            uniform float uVignette;
+            uniform float uBloom;
+            uniform float uFalloff;
+            uniform float uDesat;
             varying vec2 vUv;
             // One texel of the matte, which always arrives 256 across.
             const float MPX = 0.00390625;
@@ -645,12 +722,34 @@ class BlurRenderer : GLSurfaceView.Renderer {
                 // keeps that colour off the rim.
                 float push = uDecon * m * (1.0 - m) * 4.0;
                 vec2 qb = q - step * push;
-                vec3 blur = texture2D(uBlur, vec2(qb.x, 1.0 - qb.y)).rgb;
 
-                // The blurred copy always comes from a 320x180 buffer, so it is
-                // far softer than any amount the low end of the scale should
-                // show; the background is mixed between the two instead.
-                vec3 bg = mix(sharp, blur, uStrength);
+                // Outside the in-focus band a real lens keeps going soft, so the
+                // corners get more of the deepest level than the middle does.
+                vec2 fromCentre = vec2(p.x * uOutAspect, p.y) * 2.0;
+                float edge = smoothstep(0.45, 1.10, length(fromCentre));
+                // Each octave fades in over its own range of the dial, so
+                // turning the blur up widens the glow instead of just
+                // stretching the same small kernel into streaks. The chain is
+                // a convex blend, which keeps the ramp monotone.
+                float midMix = smoothstep(0.25, 0.75, uAmount);
+                float deepMix = smoothstep(0.60, 0.97, uAmount);
+                deepMix = clamp(deepMix * (1.0 + uFalloff * edge), 0.0, 1.0);
+
+                vec3 blurNear = texture2D(uBlur, vec2(qb.x, 1.0 - qb.y)).rgb;
+                vec3 blurMid = texture2D(uMid, vec2(qb.x, 1.0 - qb.y)).rgb;
+                vec3 blurDeep = texture2D(uDeep, vec2(qb.x, 1.0 - qb.y)).rgb;
+                vec3 blur = mix(blurNear, blurMid, midMix);
+                blur = mix(blur, blurDeep, deepMix);
+
+                // Long glass dims the corners, drains a little colour out of the
+                // far field and lets highlights swell into discs.
+                blur *= 1.0 - uVignette * edge;
+                float grey = dot(blur, vec3(0.299, 0.587, 0.114));
+                blur = mix(blur, vec3(grey), uDesat * deepMix);
+                blur += max(blur - 0.72, 0.0) * uBloom;
+
+                float reveal = clamp(uStrength * (1.0 + 0.15 * uFalloff * edge), 0.0, 1.0);
+                vec3 bg = mix(sharp, blur, reveal);
                 gl_FragColor = vec4(mix(bg, sharp, m), 1.0);
             }
         """

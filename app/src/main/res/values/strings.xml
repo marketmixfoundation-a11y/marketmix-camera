@@ -11,6 +11,15 @@
     <string name="blur_plus">+</string>
     <string name="blur_decrease">Decrease blur</string>
     <string name="blur_increase">Increase blur</string>
+    <string name="lens">Lens</string>
+    <string name="lens_35">35mm</string>
+    <string name="lens_50">50mm</string>
+    <string name="lens_85">85mm</string>
+    <string name="lens_135">135mm</string>
+    <string name="lens_35_desc">35mm wide lens look</string>
+    <string name="lens_50_desc">50mm standard lens look</string>
+    <string name="lens_85_desc">85mm portrait lens look</string>
+    <string name="lens_135_desc">135mm telephoto lens look</string>
     <string name="percent">%1$d%%</string>
     <string name="ready">Ready</string>
     <string name="recording">Recording</string>

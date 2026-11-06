@@ -35,7 +35,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var recordButton: Button
     private lateinit var blurLabel: TextView
-    private var blurStep = DEFAULT_BLUR
+    private var blurStep = Math.round(LensPreset.DEFAULT.blur * BLUR_MAX)
+    private lateinit var lensButtons: Map<LensPreset, Button>
     private lateinit var smoothLabel: TextView
     private var edgePercent = DEFAULT_SMOOTH
 
@@ -81,7 +82,17 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.blur_minus).setOnClickListener { setBlur(blurStep - BLUR_STEP) }
         findViewById<Button>(R.id.blur_plus).setOnClickListener { setBlur(blurStep + BLUR_STEP) }
-        setBlur(blurStep)
+
+        lensButtons = mapOf(
+            LensPreset.WIDE_35 to findViewById(R.id.lens_35),
+            LensPreset.STANDARD_50 to findViewById(R.id.lens_50),
+            LensPreset.PORTRAIT_85 to findViewById(R.id.lens_85),
+            LensPreset.TELE_135 to findViewById(R.id.lens_135)
+        )
+        lensButtons.forEach { (preset, button) ->
+            button.setOnClickListener { applyLens(preset) }
+        }
+        applyLens(LensPreset.DEFAULT)
 
         invertBox.setOnCheckedChangeListener { _, checked ->
             renderer.invert = checked
@@ -154,6 +165,23 @@ class MainActivity : AppCompatActivity() {
         blurLabel.text = blurStep.toString()
         glView.renderer.blurAmount = blurStep / BLUR_MAX.toFloat()
         glView.requestRender()
+    }
+
+    /**
+     * Picks the focus character. The blur step follows the preset so the
+     * preview matches the label straight away; the +/- buttons still move it
+     * from there without leaving the lens.
+     */
+    private fun applyLens(preset: LensPreset) {
+        glView.renderer.preset = preset
+        setBlur(Math.round(preset.blur * BLUR_MAX))
+        lensButtons.forEach { (lens, button) ->
+            val selected = lens == preset
+            button.setBackgroundResource(
+                if (selected) R.drawable.bg_pill_on else R.drawable.bg_pill
+            )
+            button.alpha = if (selected) 1f else 0.75f
+        }
     }
 
     /** How far the cut line is feathered, in percent of its full range. */
@@ -409,7 +437,6 @@ class MainActivity : AppCompatActivity() {
         private const val MASK_SIZE = 256
         private const val MAX_SECONDS = 300L
         private const val ENCODER_TIMEOUT_SECONDS = 2L
-        private const val DEFAULT_BLUR = 5
         private const val BLUR_MAX = 10
         private const val BLUR_STEP = 1
         private const val DEFAULT_SMOOTH = 35
