@@ -19,8 +19,8 @@ android {
         applicationId = "site.marketmix.camera"
         minSdk = 29
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.1.8"
+        versionCode = 10
+        versionName = "0.1.9"
 
         ndk {
             // ML Kit carries the segmentation runtime for every ABI, which is
@@ -69,4 +69,5 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.4.1")
     implementation("androidx.camera:camera-lifecycle:1.4.1")
     implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
 }

@@ -37,6 +37,9 @@ class BlurRenderer : GLSurfaceView.Renderer {
     private val lock = Any()
     private var pendingFrame: Bitmap? = null
     private var pendingMask: Bitmap? = null
+    private var pendingDepth: Bitmap? = null
+    @Volatile private var pendingSubject = 0f
+    @Volatile private var depthActive = false
 
     private val quad: FloatBuffer = ByteBuffer
         .allocateDirect(4 * 4 * 4)
@@ -56,8 +59,11 @@ class BlurRenderer : GLSurfaceView.Renderer {
     private var camW = 0
     private var camH = 0
     private var maskTex = 0
+    private var depthTex = 0
     private var hasMask = false
     private var hasFrame = false
+    private var hasDepth = false
+    private var subjectDepth = 0f
 
     private var sharp: Fbo? = null
     private var small: Fbo? = null
@@ -103,6 +109,9 @@ class BlurRenderer : GLSurfaceView.Renderer {
     private var compBloomLoc = 0
     private var compFalloffLoc = 0
     private var compDesatLoc = 0
+    private var compDepthLoc = 0
+    private var compSubjectLoc = 0
+    private var compHasDepthLoc = 0
     private var encPosition = 0
     private var encTexCoord = 0
     private var encTexLoc = 0
@@ -126,6 +135,23 @@ class BlurRenderer : GLSurfaceView.Renderer {
         synchronized(lock) {
             pendingMask?.recycle()
             pendingMask = bitmap
+        }
+    }
+
+    fun submitDepth(bitmap: Bitmap, subject: Float) {
+        synchronized(lock) {
+            pendingDepth?.recycle()
+            pendingDepth = bitmap
+            pendingSubject = subject
+            depthActive = true
+        }
+    }
+
+    fun resetDepth() {
+        synchronized(lock) {
+            pendingDepth?.recycle()
+            pendingDepth = null
+            depthActive = false
         }
     }
 
@@ -211,9 +237,17 @@ class BlurRenderer : GLSurfaceView.Renderer {
         compBloomLoc = GLES20.glGetUniformLocation(compProg, "uBloom")
         compFalloffLoc = GLES20.glGetUniformLocation(compProg, "uFalloff")
         compDesatLoc = GLES20.glGetUniformLocation(compProg, "uDesat")
+        compDepthLoc = GLES20.glGetUniformLocation(compProg, "uDepth")
+        compSubjectLoc = GLES20.glGetUniformLocation(compProg, "uSubject")
+        compHasDepthLoc = GLES20.glGetUniformLocation(compProg, "uHasDepth")
 
         camTex = newTexture()
         maskTex = newTexture()
+        depthTex = newTexture()
+        val black = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { eraseColor(0xFF000000.toInt()) }
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, depthTex)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, black, 0)
+        black.recycle()
         // Start with a fully white mask so the preview is sharp until the
         // first segmentation result arrives.
         val white = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { eraseColor(0xFFFFFFFF.toInt()) }
@@ -234,6 +268,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
 
         hasFrame = false
         hasMask = false
+        hasDepth = false
         onReady?.invoke()
     }
 
@@ -257,8 +292,11 @@ class BlurRenderer : GLSurfaceView.Renderer {
         maskSoft = null
         if (camTex != 0) GLES20.glDeleteTextures(1, intArrayOf(camTex), 0)
         if (maskTex != 0) GLES20.glDeleteTextures(1, intArrayOf(maskTex), 0)
+        if (depthTex != 0) GLES20.glDeleteTextures(1, intArrayOf(depthTex), 0)
         camTex = 0
         maskTex = 0
+        depthTex = 0
+        hasDepth = false
         camW = 0
         camH = 0
         listOf(camProg, blitProg, plateProg, fillProg, blurProg, compProg).forEach { prog ->
@@ -282,11 +320,20 @@ class BlurRenderer : GLSurfaceView.Renderer {
         var frameUpdated = false
         var frame: Bitmap? = null
         var mask: Bitmap? = null
+        var depth: Bitmap? = null
         synchronized(lock) {
             frame = pendingFrame
             pendingFrame = null
             mask = pendingMask
             pendingMask = null
+            depth = pendingDepth
+            pendingDepth = null
+            if (depthActive) {
+                hasDepth = true
+                subjectDepth = pendingSubject
+            } else {
+                hasDepth = false
+            }
         }
         frame?.let {
             uploadCamera(it)
@@ -298,6 +345,11 @@ class BlurRenderer : GLSurfaceView.Renderer {
             uploadMask(it)
             it.recycle()
             hasMask = true
+        }
+        depth?.let {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, depthTex)
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, it, 0)
+            it.recycle()
         }
 
         if (!hasFrame) {
@@ -406,6 +458,11 @@ class BlurRenderer : GLSurfaceView.Renderer {
         GLES20.glActiveTexture(GLES20.GL_TEXTURE4)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, if (hasMask && amount > 0f) midAFbo.tex else sharpFbo.tex)
         GLES20.glUniform1i(compMidLoc, 4)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE5)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, depthTex)
+        GLES20.glUniform1i(compDepthLoc, 5)
+        GLES20.glUniform1f(compSubjectLoc, subjectDepth)
+        GLES20.glUniform1f(compHasDepthLoc, if (hasDepth && hasMask) 1f else 0f)
         GLES20.glUniform1f(compRotLoc, Math.toRadians(rotationDeg.toDouble()).toFloat())
         GLES20.glUniform1f(compMirrorLoc, if (mirror) 1f else 0f)
         GLES20.glUniform1f(compInvertLoc, if (invert) 1f else 0f)
@@ -783,6 +840,9 @@ class BlurRenderer : GLSurfaceView.Renderer {
             uniform float uBloom;
             uniform float uFalloff;
             uniform float uDesat;
+            uniform sampler2D uDepth;
+            uniform float uSubject;
+            uniform float uHasDepth;
             varying vec2 vUv;
             void main() {
                 vec2 outTopDown = vec2(vUv.x, 1.0 - vUv.y);
@@ -816,6 +876,21 @@ class BlurRenderer : GLSurfaceView.Renderer {
                 // the person. Steepening the rim keeps the transition on the
                 // silhouette and lets the subject meet its own edge.
                 m = smoothstep(0.40, 0.60, m);
+
+                // Depth separates front from back: anything nearer than the
+                // subject is foreground and stays sharp; only what is behind
+                // the focus plane is allowed to defocus. A close subject sits
+                // around 0.9 of the frame depth, so the band is a share of the
+                // headroom left above it; fixed offsets would run past 1.0 and
+                // protect nothing. The ramp is centred a hair above the
+                // subject's median, so noise just behind it still blurs while
+                // the nearest foreground is fully sharp.
+                if (uHasDepth > 0.5) {
+                    float d = texture2D(uDepth, q).r;
+                    float head = max(1.0 - uSubject, 0.02);
+                    float fg = smoothstep(uSubject - 0.05 * head, uSubject + 0.10 * head, d);
+                    m = max(m, fg);
+                }
 
                 // Outside the in-focus band a real lens keeps going soft, so the
                 // corners get more of the deepest level than the middle does.

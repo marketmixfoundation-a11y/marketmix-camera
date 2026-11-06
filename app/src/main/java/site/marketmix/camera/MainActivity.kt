@@ -3,10 +3,12 @@ package site.marketmix.camera
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
@@ -41,14 +43,24 @@ class MainActivity : AppCompatActivity() {
     private var edgePercent = DEFAULT_SMOOTH
 
     private lateinit var segmenter: Segmenter
+    private lateinit var depthEstimator: DepthEstimator
     private var controller: CameraController? = null
     private var cameraStarted = false
     private var front = false
 
     private val segmentExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val depthExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val segmentBusy = AtomicBoolean(false)
+    private val depthBusy = AtomicBoolean(false)
     private val maskBytes = ByteArray(MASK_SIZE * MASK_SIZE)
+    private val depthRaw = FloatArray(MASK_SIZE * MASK_SIZE)
+    private val depthSmooth = FloatArray(MASK_SIZE * MASK_SIZE)
+    private val depthBytes = ByteArray(MASK_SIZE * MASK_SIZE)
+    private var lastDepthMs = 0L
+
+    @Volatile
+    private var lastLoggedSubject = Float.NaN
     private val handler = Handler(Looper.getMainLooper())
 
     private var recording = false
@@ -117,6 +129,11 @@ class MainActivity : AppCompatActivity() {
             renderer.mirror = front
             segmentBusy.set(false)
             segmenter.reset()
+            depthBusy.set(false)
+            depthSmooth.fill(0f)
+            lastDepthMs = 0L
+            lastLoggedSubject = Float.NaN
+            renderer.resetDepth()
             controller?.switchCamera()
             glView.requestRender()
         }
@@ -127,6 +144,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         segmenter = Segmenter()
+        depthEstimator = DepthEstimator(this)
         applyInsets()
         ensurePermissions()
     }
@@ -155,7 +173,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         segmentExecutor.shutdownNow()
+        depthExecutor.shutdownNow()
         ioExecutor.shutdownNow()
+        // A run in flight touches the native interpreter; closing it under
+        // that thread would kill the process.
+        try {
+            depthExecutor.awaitTermination(ENCODER_TIMEOUT_SECONDS * 2, TimeUnit.SECONDS)
+        } catch (_: InterruptedException) {
+        }
+        depthEstimator.close()
         super.onDestroy()
     }
 
@@ -258,6 +284,13 @@ class MainActivity : AppCompatActivity() {
         val wantsMask = segmentBusy.compareAndSet(false, true)
         val small = if (wantsMask) Bitmap.createScaledBitmap(frame, MASK_SIZE, MASK_SIZE, true) else null
 
+        val now = System.currentTimeMillis()
+        // One inference takes about a second, so the interval is measured from
+        // the end of the last run; back-to-back runs would peg a core for nothing.
+        val wantsDepth = renderer.blurAmount > 0f &&
+            now - lastDepthMs >= DEPTH_INTERVAL_MS && depthBusy.compareAndSet(false, true)
+        val depthSmall = if (wantsDepth) Bitmap.createScaledBitmap(frame, MASK_SIZE, MASK_SIZE, true) else null
+
         renderer.submitFrame(frame)
         glView.requestRender()
 
@@ -274,6 +307,98 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+
+        if (depthSmall != null) {
+            depthExecutor.execute {
+                try {
+                    runDepth(depthSmall, rotationDegrees)
+                } catch (_: Exception) {
+                } finally {
+                    depthSmall.recycle()
+                    lastDepthMs = System.currentTimeMillis()
+                    depthBusy.set(false)
+                }
+            }
+        }
+    }
+
+    /**
+     * Estimates relative depth and turns it into a foreground-protection matte:
+     * pixels nearer than the subject stay sharp, only what is behind blurs.
+     * Runs slower than the preview so the depth model never stalls the lens.
+     */
+    private fun runDepth(small: Bitmap, rotationDegrees: Int) {
+        val quarter = ((rotationDegrees % 360) + 360) % 360
+        val upright = if (quarter == 0) small else stoodUp(small, quarter)
+        val ok = depthEstimator.estimate(upright, depthRaw)
+        if (upright !== small) upright.recycle()
+        if (!ok) return
+
+        var min = Float.MAX_VALUE
+        var max = -Float.MAX_VALUE
+        for (v in depthRaw) {
+            if (v < min) min = v
+            if (v > max) max = v
+        }
+        val span = (max - min).coerceAtLeast(1e-6f)
+        for (y in 0 until MASK_SIZE) {
+            for (x in 0 until MASK_SIZE) {
+                var sx = x
+                var sy = y
+                when (quarter) {
+                    90 -> { sx = MASK_SIZE - 1 - y; sy = x }
+                    180 -> { sx = MASK_SIZE - 1 - x; sy = MASK_SIZE - 1 - y }
+                    270 -> { sx = y; sy = MASK_SIZE - 1 - x }
+                }
+                val n = (depthRaw[sy * MASK_SIZE + sx] - min) / span
+                val i = y * MASK_SIZE + x
+                // Inference runs about once a second, so lean on the new frame
+                // or a moving phone drags a stale foreground band behind it.
+                depthSmooth[i] = depthSmooth[i] * 0.25f + n * 0.75f
+                depthBytes[i] = (depthSmooth[i] * 255f).toInt().coerceIn(0, 255).toByte()
+            }
+        }
+
+        // The subject's own depth is the focus plane; anything nearer is foreground.
+        val samples = ArrayList<Float>()
+        for (i in depthSmooth.indices) {
+            if ((maskBytes[i].toInt() and 0xFF) > 128) samples.add(depthSmooth[i])
+        }
+        if (samples.size < 64) {
+            glView.renderer.resetDepth()
+            logDepth(-1f)
+            return
+        }
+        samples.sort()
+        val subject = samples[samples.size / 2]
+        glView.renderer.submitDepth(depthBitmap(), subject)
+        glView.requestRender()
+        logDepth(subject)
+    }
+
+    private fun logDepth(subject: Float) {
+        if (Math.abs(subject - lastLoggedSubject) < 0.04f) return
+        lastLoggedSubject = subject
+        if (subject < 0f) {
+            Log.d(TAG, "depth: no person")
+        } else {
+            Log.d(TAG, "depth: subject=%.2f".format(subject))
+        }
+    }
+
+    private fun depthBitmap(): Bitmap {
+        val pixels = IntArray(MASK_SIZE * MASK_SIZE)
+        for (i in pixels.indices) {
+            val v = depthBytes[i].toInt() and 0xFF
+            pixels[i] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+        }
+        return Bitmap.createBitmap(pixels, MASK_SIZE, MASK_SIZE, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun stoodUp(src: Bitmap, degrees: Int): Bitmap {
+        val matrix = Matrix()
+        matrix.postRotate(degrees.toFloat())
+        return Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
     }
 
     private fun startRecording() {
@@ -433,6 +558,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        private const val TAG = "MarketMixCamera"
         private const val REQUEST_PERMISSIONS = 1001
         private const val MASK_SIZE = 256
         private const val MAX_SECONDS = 300L
@@ -440,5 +566,6 @@ class MainActivity : AppCompatActivity() {
         private const val BLUR_MAX = 10
         private const val BLUR_STEP = 1
         private const val DEFAULT_SMOOTH = 35
+        private const val DEPTH_INTERVAL_MS = 600L
     }
 }
