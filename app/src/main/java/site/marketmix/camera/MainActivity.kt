@@ -412,6 +412,6 @@ class MainActivity : AppCompatActivity() {
         private const val DEFAULT_BLUR = 5
         private const val BLUR_MAX = 10
         private const val BLUR_STEP = 1
-        private const val DEFAULT_SMOOTH = 0
+        private const val DEFAULT_SMOOTH = 35
     }
 }

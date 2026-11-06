@@ -15,14 +15,16 @@ object MaskTools {
     }
 
     /**
-     * Two separable max passes, so the subject grows by two mask texels. The
+     * Two separable max passes, so the subject grows by one mask texel. The
      * model's outline falls just inside the person, which otherwise blurs the
-     * nearest edge of a shoulder or arm and looks wrong.
+     * nearest edge of a shoulder or arm and looks wrong. One texel is enough
+     * now the renderer softens the outline itself; growing it further used to
+     * leave a sharp band of unblurred background clinging to the subject.
      */
     private fun dilate(mask: ByteArray, size: Int): ByteArray {
         val a = IntArray(size * size) { mask[it].toInt() and 0xFF }
         val b = IntArray(size * size)
-        repeat(2) {
+        repeat(1) {
             for (y in 0 until size) {
                 val row = y * size
                 for (x in 0 until size) {

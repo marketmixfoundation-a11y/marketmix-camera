@@ -144,7 +144,7 @@
                 android:layout_marginStart="12dp"
                 android:layout_weight="1"
                 android:max="100"
-                android:progress="0" />
+                android:progress="35" />
 
             <TextView
                 android:id="@+id/smooth_value"

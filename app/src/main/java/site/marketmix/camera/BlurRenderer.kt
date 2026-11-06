@@ -62,6 +62,8 @@ class BlurRenderer : GLSurfaceView.Renderer {
     private var small: Fbo? = null
     private var blurred: Fbo? = null
     private var finalFbo: Fbo? = null
+    private var maskScratch: Fbo? = null
+    private var maskSoft: Fbo? = null
 
     private var camProg = 0
     private var blitProg = 0
@@ -80,7 +82,9 @@ class BlurRenderer : GLSurfaceView.Renderer {
     private var compRotLoc = 0
     private var compMirrorLoc = 0
     private var compInvertLoc = 0
-    private var compSoftLoc = 0
+    private var compAspectLoc = 0
+    private var compShrinkLoc = 0
+    private var compDeconLoc = 0
     private var compStrengthLoc = 0
     private var encPosition = 0
     private var encTexCoord = 0
@@ -175,7 +179,9 @@ class BlurRenderer : GLSurfaceView.Renderer {
         compRotLoc = GLES20.glGetUniformLocation(compProg, "uRot")
         compMirrorLoc = GLES20.glGetUniformLocation(compProg, "uMirror")
         compInvertLoc = GLES20.glGetUniformLocation(compProg, "uInvert")
-        compSoftLoc = GLES20.glGetUniformLocation(compProg, "uSoft")
+        compAspectLoc = GLES20.glGetUniformLocation(compProg, "uAspect")
+        compShrinkLoc = GLES20.glGetUniformLocation(compProg, "uShrink")
+        compDeconLoc = GLES20.glGetUniformLocation(compProg, "uDecon")
         compStrengthLoc = GLES20.glGetUniformLocation(compProg, "uStrength")
 
         camTex = newTexture()
@@ -190,6 +196,8 @@ class BlurRenderer : GLSurfaceView.Renderer {
         small = createFbo(SMALL_W, SMALL_H)
         blurred = createFbo(SMALL_W, SMALL_H)
         finalFbo = createFbo(OUT_W, OUT_H)
+        maskScratch = createFbo(MASK_RES, MASK_RES)
+        maskSoft = createFbo(MASK_RES, MASK_RES)
 
         hasFrame = false
         hasMask = false
@@ -197,7 +205,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
     }
 
     private fun releaseGl() {
-        listOf(sharp, small, blurred, finalFbo).forEach { fbo ->
+        listOf(sharp, small, blurred, finalFbo, maskScratch, maskSoft).forEach { fbo ->
             fbo ?: return@forEach
             GLES20.glDeleteFramebuffers(1, intArrayOf(fbo.fbo), 0)
             GLES20.glDeleteTextures(1, intArrayOf(fbo.tex), 0)
@@ -206,6 +214,8 @@ class BlurRenderer : GLSurfaceView.Renderer {
         small = null
         blurred = null
         finalFbo = null
+        maskScratch = null
+        maskSoft = null
         if (camTex != 0) GLES20.glDeleteTextures(1, intArrayOf(camTex), 0)
         if (maskTex != 0) GLES20.glDeleteTextures(1, intArrayOf(maskTex), 0)
         camTex = 0
@@ -290,6 +300,12 @@ class BlurRenderer : GLSurfaceView.Renderer {
         val blurFbo = blurred ?: return
         val finalTarget = finalFbo ?: return
 
+        val aspect = if (camH > 0) camW.toFloat() / camH else CAM_W.toFloat() / CAM_H
+        // A wider blur needs a wider blend or the cut reads as a hard line, so
+        // the feather grows with the blur as well as with the slider.
+        val feather = edgeSoftness * FEATHER_MAX + blurAmount * BLUR_FEATHER
+        renderMask(aspect, feather)
+
         // Sharp camera frame, stored top-down in the target.
         bind(sharpFbo)
         GLES20.glViewport(0, 0, sharpFbo.w, sharpFbo.h)
@@ -340,14 +356,45 @@ class BlurRenderer : GLSurfaceView.Renderer {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, if (hasMask && blurAmount > 0f) smallFbo.tex else sharpFbo.tex)
         GLES20.glUniform1i(compBlurLoc, 1)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, maskTex)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, if (hasMask) maskSoft?.tex ?: maskTex else maskTex)
         GLES20.glUniform1i(compMaskLoc, 2)
         GLES20.glUniform1f(compRotLoc, Math.toRadians(rotationDeg.toDouble()).toFloat())
         GLES20.glUniform1f(compMirrorLoc, if (mirror) 1f else 0f)
         GLES20.glUniform1f(compInvertLoc, if (invert) 1f else 0f)
-        GLES20.glUniform1f(compSoftLoc, edgeSoftness)
+        GLES20.glUniform1f(compAspectLoc, aspect)
+        GLES20.glUniform1f(compShrinkLoc, blurAmount * SHRINK_MAX)
+        GLES20.glUniform1f(compDeconLoc, minOf(3f, 1f + feather * 0.4f))
         GLES20.glUniform1f(compStrengthLoc, strength())
         drawQuad(vPosition, vTexCoord)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+    }
+
+    /**
+     * Softens the matte where the cut is made.
+     *
+     * The matte arrives at a quarter of the frame width and stretched to a
+     * square, so one texel covers more horizontally than vertically; the two
+     * passes correct for that so the cut is the same width in every direction.
+     */
+    private fun renderMask(aspect: Float, feather: Float) {
+        if (!hasMask) return
+        val scratch = maskScratch ?: return
+        val soft = maskSoft ?: return
+
+        blurPass(scratch, maskTex, feather / MASK_RES, 0f)
+        blurPass(soft, scratch.tex, 0f, feather * aspect / MASK_RES)
+    }
+
+    private fun blurPass(target: Fbo, source: Int, dx: Float, dy: Float) {
+        bind(target)
+        GLES20.glViewport(0, 0, target.w, target.h)
+        GLES20.glUseProgram(blurProg)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source)
+        GLES20.glUniform1i(blurTexLoc, 0)
+        GLES20.glUniform2f(blurDirLoc, dx, dy)
+        drawQuad(vPosition, vTexCoord)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
     }
 
     private fun drawToScreen() {
@@ -493,6 +540,16 @@ class BlurRenderer : GLSurfaceView.Renderer {
         const val OUT_H = 1280
         const val SMALL_W = 320
         const val SMALL_H = 180
+        const val MASK_RES = 256
+
+        /** Matte feather, in mask texels of frame width, at full smoothness. */
+        private const val FEATHER_MAX = 6f
+
+        /** Extra feather the full blur scale brings with it. */
+        private const val BLUR_FEATHER = 2.5f
+
+        /** How far the matte comes back off the subject at full blur. */
+        private const val SHRINK_MAX = 1.5f
 
         private const val VERTEX = """
             attribute vec4 aPos;
@@ -523,7 +580,7 @@ class BlurRenderer : GLSurfaceView.Renderer {
         """
 
         private const val BLUR_FRAGMENT = """
-            precision mediump float;
+            precision highp float;
             uniform sampler2D uTex;
             uniform vec2 uDir;
             varying vec2 vUv;
@@ -538,16 +595,20 @@ class BlurRenderer : GLSurfaceView.Renderer {
         """
 
         private const val COMPOSITE_FRAGMENT = """
-            precision mediump float;
+            precision highp float;
             uniform sampler2D uSharp;
             uniform sampler2D uBlur;
             uniform sampler2D uMask;
             uniform float uRot;
             uniform float uMirror;
             uniform float uInvert;
-            uniform float uSoft;
+            uniform float uAspect;
+            uniform float uShrink;
+            uniform float uDecon;
             uniform float uStrength;
             varying vec2 vUv;
+            // One texel of the matte, which always arrives 256 across.
+            const float MPX = 0.00390625;
             void main() {
                 vec2 outTopDown = vec2(vUv.x, 1.0 - vUv.y);
                 vec2 p = outTopDown - 0.5;
@@ -557,24 +618,39 @@ class BlurRenderer : GLSurfaceView.Renderer {
                 vec2 q = vec2(c * p.x - s * p.y, s * p.x + c * p.y) + 0.5;
                 if (uMirror > 0.5) q.x = 1.0 - q.x;
                 vec3 sharp = texture2D(uSharp, vec2(q.x, 1.0 - q.y)).rgb;
-                vec3 blur = texture2D(uBlur, vec2(q.x, 1.0 - q.y)).rgb;
+
+                // Outward normal of the subject, in texture steps. The matte is
+                // stretched over a frame that is wider than it is tall, so the
+                // horizontal and vertical differences are not the same length
+                // on screen and have to be balanced before normalising.
+                float gx = texture2D(uMask, q + vec2(MPX, 0.0)).r -
+                    texture2D(uMask, q - vec2(MPX, 0.0)).r;
+                float gy = texture2D(uMask, q + vec2(0.0, MPX)).r -
+                    texture2D(uMask, q - vec2(0.0, MPX)).r;
+                if (uInvert > 0.5) { gx = -gx; gy = -gy; }
+                vec2 g = vec2(gx / uAspect, gy);
+                float glen = length(g);
+                vec2 step = glen > 0.0001 ? (g / glen) * vec2(1.0, uAspect) * MPX : vec2(0.0);
+
+                // A defocused background spills in front of the subject, so the
+                // more blur there is, the further the matte comes back off the
+                // person. Without this the cut sits outside the silhouette and
+                // reads as a gap.
+                float m = texture2D(uMask, q - step * uShrink).r;
+                if (uInvert > 0.5) m = 1.0 - m;
+
+                // The blurred copy is made from the whole frame, so it carries
+                // the subject's own colour smeared outwards. Stepping the
+                // background sample away from the person across the cut band
+                // keeps that colour off the rim.
+                float push = uDecon * m * (1.0 - m) * 4.0;
+                vec2 qb = q - step * push;
+                vec3 blur = texture2D(uBlur, vec2(qb.x, 1.0 - qb.y)).rgb;
+
                 // The blurred copy always comes from a 320x180 buffer, so it is
                 // far softer than any amount the low end of the scale should
                 // show; the background is mixed between the two instead.
                 vec3 bg = mix(sharp, blur, uStrength);
-                float m = texture2D(uMask, q).r;
-                // uSoft slides the sample spread and the transition band, so
-                // at 0 the taps collapse onto the centre and the ramp is the
-                // plain cut.
-                float t = 0.01171875 * uSoft;
-                m += texture2D(uMask, q + vec2(t, 0.0)).r;
-                m += texture2D(uMask, q - vec2(t, 0.0)).r;
-                m += texture2D(uMask, q + vec2(0.0, t)).r;
-                m += texture2D(uMask, q - vec2(0.0, t)).r;
-                m *= 0.2;
-                if (uInvert > 0.5) m = 1.0 - m;
-                float band = mix(0.15, 0.45, uSoft);
-                m = smoothstep(0.5 - band, 0.5 + band, m);
                 gl_FragColor = vec4(mix(bg, sharp, m), 1.0);
             }
         """
